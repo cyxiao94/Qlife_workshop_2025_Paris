@@ -1,0 +1,348 @@
+---
+title: "CMH & chisq tests"
+author: "Changyi"
+date: "2025--28"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## library packages
+```{r import packages}
+require(poolSeq)
+require(data.table)
+require(dplyr)
+require(tidyr)
+require(IHW)
+require(ACER)
+require(fdrtool)
+library(gridExtra)
+library(grid)
+require(mclust)
+library(factoextra)
+library(ggplot2)
+library(ggpubr)
+library(ggrepel)
+library(data.table)
+```
+
+# 1. loading files & data process
+### 1.1 initial parameters
+```{r initial parameters}
+#with intermediate time points
+input_gen=seq(0,60,10)
+#without intermediate time points
+input_gen2 =c(0,60)
+input_rep=10
+chromosomes="2L"
+```
+
+
+### 1.2 read af and cov files
+```{r read af and cov}
+#load freq file (no header!!!)
+af0=fread("01FL_hot_0to60.af.txt.gz")
+#assign column names, order is F0 (r1 to 10), F10 (r1 to 10), ... F60 (r1 to 10)
+colnames(af0)=c("CHR","POS","REF","ALT",
+                paste(rep(paste("F",input_gen,sep=""),each=input_rep),
+               rep(paste("R",1:input_rep,sep=""),length(input_gen)),"freq",
+               sep=".")
+)
+#save our columns as numeric
+my_freqf=apply(af0[,5:(length(input_gen)*input_rep+4)],2,as.numeric); #rename rows
+rownames(my_freqf)=paste(af0$CHR,af0$POS,sep=".")
+
+#load coverage file 
+cov0=fread("01FL_hot_0to60.cov.txt.gz")
+colnames(cov0)=c("CHR","POS","REF","ALT",
+                paste(rep(paste("F",input_gen,sep=""),each=input_rep),
+                rep(paste("R",1:input_rep,sep=""),length(input_gen)),"cov",
+                sep=".")
+)
+my_cov=apply(cov0[,5:(length(input_gen)*input_rep+4)],2,as.numeric); rownames(my_cov)=paste(cov0$CHR,cov0$POS,sep=".")
+rm(af0);rm(cov0)
+```
+
+### 1.3 Remove snps with null variance across samples: QC
+```{r Remove snps with null variance across samples and 0 coverage}
+var = apply(my_freqf, 1, function(x) var(na.omit(x)))
+ind1 = which(var == 0) #no variants site(SNPs that does not change AF)
+ind2 = which(rowSums(is.na(my_freqf))>0) #with missing data
+ind3 = which(apply(my_cov, 1, function(x) min(x))<5) #minimum coverage of 5
+ind=sort(unique(c(ind1,ind2,ind3)))
+if (length(ind) != 0) {
+  my_freqf=my_freqf[-ind,]
+  my_cov=my_cov[-ind,]}
+#save your filtered af & coverage
+saveRDS(my_freqf,file='01rds/filtered_af.rds')
+saveRDS(my_cov,file='01rds/filtered_cov.rds')
+
+rm(ind);rm(ind1);rm(ind2);rm(ind3);rm(var)
+rm(my_freqf);rm(my_cov)
+```
+
+# 2.PCA
+```{r PCA}
+#continue with our filtered frequency
+my_freqf=readRDS('01rds/filtered_af.rds')
+#transform out frequencyes wto 2 *arcsin ((freq)^0.5)
+dat = na.omit(my_freqf)
+#prepare for PCA
+clmnames=colnames(dat)
+sampleIDs = sub(".freq","",clmnames)
+splits = unlist(strsplit(sampleIDs, "[.]"))
+generation = as.factor(splits[grep("F",splits)])
+rep= factor(splits[grep("R",splits)], levels=paste("R",1:input_rep, sep=""))
+pcadata=as.data.frame(t(dat))
+row.names(pcadata)=sampleIDs
+#do pca
+pca.res = prcomp(pcadata, retx=TRUE, center = TRUE, scale. =TRUE)
+pca.var=get_eigenvalue(pca.res)
+#plot pc1 & pc2
+p1=ggplot(as.data.frame(pca.res$x),aes(x=PC1,y=PC2, col=rep, shape=generation))+
+  geom_point()+
+  scale_shape_manual(values = c(1,2,0,3,16,17,15))+
+  xlab(paste("PC1(",round(pca.var$variance.percent[1], 2),"%)",sep=""))+
+  ylab(paste("PC2(",round(pca.var$variance.percent[2], 2),"%)",sep=""))
+plot(p1)
+#plot pc3 & pc4
+p2=ggplot(as.data.frame(pca.res$x),aes(x=PC3,y=PC4, col=rep, shape=generation))+
+  geom_point()+
+  scale_shape_manual(values = c(1,2,0,3,16,17,15))+
+  xlab(paste("PC3(",round(pca.var$variance.percent[3], 2),"%)",sep=""))+
+  ylab(paste("PC4(",round(pca.var$variance.percent[4], 2),"%)",sep=""))
+plot(p2)
+#ggsave(p1, filename="plot/PCA.pdf")
+rm(generation, clmnames, rep, sampleIDs, splits)
+rm(pca.res);rm(pca.var);rm(p1,p2)
+rm(dat);rm(pcadata);rm(my_freqf)
+```
+# 3.Ne estimation
+```{r Ne estimation}
+#load data
+my_freqf=readRDS('01rds/filtered_af.rds')
+my_cov=readRDS('01rds/filtered_cov.rds')
+med_Ne=NULL
+for (i in 1:input_rep){
+  #for each replicate, estimate Ne
+  ne=NULL
+  index=paste("F",input_gen2,".R",i,sep="")
+  af=as.data.frame(subset(my_freqf, select = paste(index,".freq",sep="")));
+  colnames(af)=paste("F",input_gen2,sep="")
+  cov=as.data.frame(subset(my_cov, select = paste(index,".cov",sep=""))); 
+  colnames(cov)=paste("F",input_gen2,sep="")
+  #define number of times to stimate NE
+  NB_trials = 100
+  off = 1
+  nb_obs = dim(af)[1]
+  for(j in 1:NB_trials){
+    set.seed(off)
+    ind = sample(x = 1:nb_obs, size = 1000)
+    ne = rbind(ne, 
+                data.frame(trial = j,
+                           #define start and end AF, COV, number of genertions, census size
+                           ne = estimateNe(p0 = af[ind,colnames(af)[1]], 
+                                           pt = af[ind,colnames(af)[2]], 
+                                           cov0 = cov[ind,colnames(af)[1]], 
+                                           covt = cov[ind,colnames(af)[2]],
+                                           t = 60, 
+                                           ploidy=2, 
+                                           truncAF=0.05, 
+                                           method=c("P.planI"), 
+                                           poolSize=rep(1000, times=2), 
+                                           Ncensus=1250)))
+    off = off+1
+    }
+  Ne = median(ne$ne)
+  ind = which(is.na(ne$ne) | ne$ne<0)
+  if(length(ind)>0){ne = ne[-ind, ]}
+  med_Ne=c(med_Ne,round(median(ne$ne)))
+}
+med_Ne=as.integer(med_Ne)
+#save Ne
+saveRDS(med_Ne, file="01rds/estiamtedNE.rds")
+print(med_Ne)
+rm(af);rm(cov);rm(my_freqf);rm(my_cov);rm(ne);rm(med_Ne)
+rm(i, ind, index, j, nb_obs, NB_trials, Ne, off)
+```
+
+# 4. adapted CMH
+
+### 4.1 two time points
+```{r adapted-CMH-2 time points}
+#load data
+my_freqf=readRDS('01rds/filtered_af.rds')
+my_cov=readRDS('01rds/filtered_cov.rds')
+med_Ne=readRDS('01rds/estiamtedNE.rds')
+  
+index=paste("F",rep(input_gen2,each=input_rep),".R",rep(1:input_rep,length(input_gen2)),sep="")
+#subset f0 and f60, tip: what is in index? which columns do we want?
+af=subset(my_freqf, select = paste(index,"freq",sep="."))
+cov=subset(my_cov, select = paste(index,"cov",sep="."))
+p.values=adapted.cmh.test(freq = af, 
+                           coverage = cov, 
+                           Ne = med_Ne, 
+                           gen = input_gen2, 
+                           repl = 1:input_rep, 
+                           order = 1,
+                           poolSize = rep(1000,ncol(af)))
+#do multiple testing correction
+adj_p=p.adjust(p.values,method = "fdr", n=length(p.values))
+#store pvalues
+p.values=cbind(splitLocusID(rownames(af)), p.values, adj_p)
+saveRDS(p.values, file="01rds/adapted_CMH_two_timepoints.rds")
+rm(my_cov, my_freqf, med_Ne, af, cov, p.values)
+rm(adj_p, index)
+```
+
+#### visualisation
+```{r adapted-CMH-2 time points-visualisation}
+#load data
+p.values=readRDS('01rds/adapted_CMH_two_timepoints.rds')
+
+p1=ggplot(p.values, 
+           aes(x=pos, y=-log10(adj_p)))+
+  geom_point(cex=0.1)+
+  #add significance line = pval = 0.05. tip: use geom_hline, dont forfet log10!
+  labs(title = "2L", x="position", y ="-log10(FDR)")
+plot(p1)
+#ggsave(p1,filename = "plot/adapted_CMH_2timepoint.tiff",units = "cm", width = 10, height = 10)
+rm(p1,p.values)
+```
+
+### 4.2  time series data
+```{r adapted_cmh-time series}
+#load data
+my_freqf=readRDS('01rds/filtered_af.rds')
+my_cov=readRDS('01rds/filtered_cov.rds')
+med_Ne=readRDS('01rds/estiamtedNE.rds')
+  #which generations are we interested in? tip: look how last index was done
+index=paste("F",rep(input_gen,each=input_rep),".R",rep(1:input_rep,length(input_gen2)),sep="")
+  #subset af & cov  
+af1=my_freqf
+cov1=my_cov
+
+p.values1=adapted.cmh.test(freq = af1, 
+                           coverage = cov1, 
+                           Ne = med_Ne, 
+                           gen = input_gen, 
+                           repl = 1:input_rep, 
+                           #how do we include intermediate points? tip: look documentation of adapted.cmh
+                           order = 1, 
+                           poolSize = rep(1000,ncol(af1)),
+                           IntGen = TRUE)
+#correct pvalues
+adj_p1=p.adjust(p.values1,method = "fdr", n=length(p.values1))
+#store results
+p.values1=cbind(splitLocusID(rownames(af1)), p.values1, adj_p1)
+saveRDS(p.values1, file="01rds/adapted_CMH_time_series.rds")
+rm(af1, cov1, my_cov, my_freqf, p.values1)
+rm(adj_p1, index, med_Ne)
+```
+
+#### visualisation
+```{r adapted_cmh-time series-visualisation}
+#load data
+p.values1=readRDS('01rds/adapted_CMH_time_series.rds')
+#plot with ggplot
+p2=ggplot(p.values1, 
+           aes(x=pos, y=-log10(adj_p1)))+
+  geom_point(cex=0.1)+
+  geom_hline(yintercept = -log10(0.05), col="red", linetype=2)+
+  labs(title = "2L", x="position", y ="-log10(FDR)")
+plot(p2)
+#ggsave(p2,filename = "plot/adapted_CMH_timeseries.tiff",units = "cm", width = 10, height = 10)
+rm(p.values1, p2)
+```
+
+# 5. adapted chisq-test
+
+### 5.1 two time point
+```{r adapted-chisq-2 time points}
+my_freqf=readRDS('01rds/filtered_af.rds')
+my_cov=readRDS('01rds/filtered_cov.rds')
+med_Ne=readRDS('01rds/estiamtedNE.rds')
+FET_result=NULL
+for (t_rep in 1:input_rep){
+#for each recplicate
+  #subset our data: replicate t_tep, generations 0 and 60
+  index=paste("F",input_gen2,".R",t_rep,sep="")
+  af=subset(my_freqf, select = paste(index,"freq",sep="."))
+  cov=subset(my_cov, select = paste(index,"cov",sep="."))
+  p.values=adapted.chisq.test(freq = af, 
+                               coverage = cov, 
+                               Ne = med_Ne[t_rep], 
+                               #which generations are we including?
+                               gen = input_gen2, 
+                               poolSize = rep(1000,ncol(af)))
+  #adjust pvalues
+  adj_p=p.adjust(p.values,method = "fdr", n=length(p.values))
+  FET_result=cbind(FET_result, p.values, adj_p)}
+  FET_result=cbind(splitLocusID(rownames(af)), FET_result)
+  colnames(FET_result)=c("chr","pos",paste("r",rep(1:input_rep,each=2), c("_p","_adj_p"), sep=""))
+saveRDS(FET_result, file="01rds/adapted_chisq_two_timepoints.rds")
+rm(af, cov, FET_result, my_cov, my_freqf, p.values)
+rm(adj_p, index, med_Ne, t_rep)
+```
+
+#### visualisation
+```{r adapted-chisq-2 time points-visualiastion}
+#load and plot results
+FET_result=readRDS('01rds/adapted_chisq_two_timepoints.rds')
+p3=ggplot(FET_result,aes(x=pos, y=-log10(r1_adj_p)))+
+  geom_point(cex=0.1)+
+  geom_hline(yintercept = -log10(0.05), col="red", linetype=2)+
+  labs(title = "2L", x="position", y ="-log10(FDR)")
+plot(p3)
+#ggsave(p3,'plot/adapted_chisq_two_timepoints.tiff', units = "cm", height = 10, width = 10)
+rm(FET_result, p3)
+```
+
+
+### 5.2 time series
+```{r adapted-chisq-time series}
+#load data
+my_freqf=readRDS('01rds/filtered_af.rds')
+my_cov=readRDS('01rds/filtered_cov.rds')
+med_Ne=readRDS('01rds/estiamtedNE.rds')
+FET_result1=NULL
+for (t_rep in 1:input_rep){
+  #subset our data: replicate t_tep, all generations
+  index=paste("F",input_gen,".R",t_rep,sep="")
+  af1=subset(my_freqf, select = paste(index,"freq",sep="."))
+  cov1=subset(my_cov, select = paste(index,"cov",sep="."))
+  p.values1=adapted.chisq.test(freq = af1, 
+                                coverage = cov1, 
+                                Ne = as.integer(med_Ne[t_rep]), 
+                                #which generations do we want to include?
+                                gen = input_gen, 
+                                poolSize = rep(1000,ncol(af1)), 
+                                IntGen = TRUE)
+  #adjust pvalues
+  adj_p1=p.adjust(p.values1,method = "fdr", n=length(p.values1))
+  FET_result1=cbind(FET_result1, p.values1, adj_p1)}
+
+  FET_result1=cbind(splitLocusID(rownames(af1)), FET_result1)
+  colnames(FET_result1)=c("chr","pos",paste("r",rep(1:input_rep,each=2), c("_p","_adj_p"), sep=""))
+  #store results
+saveRDS(FET_result1, file="01rds/adapted_chisq_timeseries.rds")
+rm(my_freqf, my_cov, med_Ne, FET_result1, index, af1, cov1, p.values1)
+rm(adj_p1)
+```
+
+#### visualisation
+```{r adapted-chisq-time series-visualisation}
+#load and plot
+FET_result1=readRDS('01rds/adapted_chisq_timeseries.rds')
+p4=ggplot(FET_result1, 
+           aes(x=pos, y=-log10(r1_adj_p)))+
+  geom_point(cex=0.1)+
+  geom_hline(yintercept = -log10(0.05), col="red", linetype=2)+
+  labs(title = "2L", x="position", y ="-log10(FDR)")
+plot(p4)
+#ggsave(p4,'plot/adapted_chisq_timeseries.tiff', units = "cm", height = 10, width = 10)
+rm(FET_result1, p4)
+```
+

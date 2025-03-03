@@ -1,0 +1,210 @@
+---
+title: "modelfit"
+author: "Changyi"
+date: "2025-02-17"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+
+
+```{r}
+library(data.table)
+library(ggplot2)
+library(poolSeq)
+library(vegan)
+```
+#functions to calculate jaccard index
+```{r}
+#af_change=data.table(afc_mat[,1:10])
+#pairwise_jaccard_index
+pairwise_jaccard_index=function(af_change){
+  af_change=data.table(af_change)
+  
+  result_list = vector("list", length = choose(ncol(af_change), 2)) 
+  idx=1
+  
+  pairwise_jaccard=data.table(var1=character(),var2=character(),jaccard=numeric())
+  for ( i in 1:(length(af_change)-1)){
+    for (j in (i+1):length(af_change)){
+      interaction_size=nrow(af_change[(af_change[[i]] >= 0.1 & af_change[[j]] >= 0.1) | (af_change[[i]] <= -0.1 & af_change[[j]] <= -0.1) ,])
+      union_size=nrow(af_change[abs(af_change[[i]]) >= 0.1 | abs(af_change[[j]]) >= 0.1,])
+    
+      jaccard_index = ifelse(union_size>0, interaction_size/union_size, 0)
+      result_list[[idx]] = data.table(var1=paste0("R",i),var2=paste0("R",j),jaccard=jaccard_index)
+      idx=idx+1
+      #pairwise_jaccard=rbind(pairwise_jaccard,
+      #                       data.table(var1=paste0("R",i),var2=paste0("R",j),jaccard=jaccard_index))
+    }
+  }
+  
+  pairwise_jaccard = rbindlist(result_list)
+  return(pairwise_jaccard)
+  }
+
+
+```
+
+
+#load haplotype id
+```{r}
+haplo_id=fread('materials/haplo_id_redundancy.txt')
+haplo_id[,chrom_pos := paste(chr,pos,sep=".")] ##snp id for the empirical data
+```
+
+#load empirical data
+```{r}
+input_gen=seq(0,60,10)
+num_repl=10
+empirical_sync=read.sync("haplotype_snp_only.sync", 
+                         gen = rep(input_gen, each=num_repl),
+                         repl = rep(1:num_repl,length(input_gen)),
+                         polarization="rising")
+af_mat=poolSeq::af(empirical_sync, repl = 1:num_repl, gen = c(0,60))
+#af_mat=as.data.table(af_mat, keep.rownames="SNP_ID")
+
+#obtain median allele frequecny per haplotype block
+af_dt=as.data.table(af_mat, keep.rownames = "chrom_pos")
+dt_merged=merge(haplo_id, af_dt, by="chrom_pos")
+cols_for_median=paste0("F",rep(c(0,60),num_repl),".R",rep(1:num_repl,each=2),".freq")
+
+dt_median <- dt_merged[, lapply(.SD, median, na.rm = TRUE), by = haplo_id, .SDcols = cols_for_median]
+
+
+afc_mat = dt_median[, seq(3,ncol(dt_median),by=2), with = FALSE] - dt_median[, seq(2,ncol(dt_median), by=2), with = FALSE]
+#afc_mat[, SNP_ID := af_mat[, SNP_ID]]
+
+empirical_jaccard=pairwise_jaccard_index(afc_mat)
+empirical_jaccard$category="empircal"
+
+
+
+
+
+```
+
+
+#load simulation data
+##model 1
+```{r}
+afc_dt=data.table()
+
+for (i in 1:20){
+  f=fread(paste0("../03day2_1SLiM/01sweep_le/rep",i,".txt"))
+  colnames(f)=c("new_pos_LE","F0_freq","F60_freq")
+  
+  #obtain median allele frequency per haplotype block
+  dt_merged=merge(haplo_id[,.(new_pos_LE,haplo_id)], f, by="new_pos_LE")
+  cols_for_median=c("F0_freq","F60_freq")
+
+  dt_median <- dt_merged[, lapply(.SD, median, na.rm = TRUE), by = haplo_id, .SDcols = cols_for_median]
+  
+  #calculate the median allele frequency change per haplotype block
+  afc_dt[,(paste0("r",i)) := dt_median[,F60_freq]-dt_median[,F0_freq]]
+}
+
+model1_jaccard=pairwise_jaccard_index(afc_dt)
+model1_jaccard$category="model1"
+```
+
+##model 2
+```{r}
+afc_dt=data.table()
+for (i in 1:20){
+  f=fread(paste0("../03day2_1SLiM/02sweep_ld/rep",i,".txt"))
+  colnames(f)=c("new_pos_LD","F0_freq","F60_freq")
+  
+  #obtain median allele frequency per haplotype block
+  dt_merged=merge(haplo_id[,.(new_pos_LD,haplo_id)], f, by="new_pos_LD")
+  cols_for_median=c("F0_freq","F60_freq")
+
+  dt_median <- dt_merged[, lapply(.SD, median, na.rm = TRUE), by = haplo_id, .SDcols = cols_for_median]
+  
+  #calculate the median allele frequency change per haplotype block
+  afc_dt[,(paste0("r",i)) := dt_median[,F60_freq]-dt_median[,F0_freq]]
+}
+
+model2_jaccard=pairwise_jaccard_index(afc_dt)
+model2_jaccard$category="model2"
+```
+
+##model3
+```{r}
+afc_dt=data.table()
+for (i in 1:20){
+  f=fread(paste0("../03day2_1SLiM/03redundancy/rep",i,".txt"))
+  colnames(f)=c("new_pos_LD","F0_freq","F60_freq")
+  
+  #obtain median allele frequency per haplotype block
+  dt_merged=merge(haplo_id[,.(new_pos_LD,haplo_id)], f, by="new_pos_LD")
+  cols_for_median=c("F0_freq","F60_freq")
+
+  dt_median <- dt_merged[, lapply(.SD, median, na.rm = TRUE), by = haplo_id, .SDcols = cols_for_median]
+  
+  #calculate the median allele frequency change per haplotype block
+  afc_dt[,(paste0("r",i)) := dt_median[,F60_freq]-dt_median[,F0_freq]]
+}
+
+model3_jaccard=pairwise_jaccard_index(afc_dt)
+model3_jaccard$category="model3"
+```
+
+##model4
+```{r}
+afc_dt=data.table()
+for (i in 1:20){
+  f=fread(paste0("../03day2_1SLiM/04qtl_le/rep",i,".txt"))
+  colnames(f)=c("new_pos_LE","F0_freq","F60_freq")
+  
+  #obtain median allele frequency per haplotype block
+  dt_merged=merge(haplo_id[,.(new_pos_LE,haplo_id)], f, by="new_pos_LE")
+  cols_for_median=c("F0_freq","F60_freq")
+
+  dt_median <- dt_merged[, lapply(.SD, median, na.rm = TRUE), by = haplo_id, .SDcols = cols_for_median]
+  
+  #calculate the median allele frequency change per haplotype block
+  afc_dt[,(paste0("r",i)) := dt_median[,F60_freq]-dt_median[,F0_freq]]
+}
+
+model4_jaccard=pairwise_jaccard_index(afc_dt)
+model4_jaccard$category="model4"
+```
+
+##model5
+```{r}
+afc_dt=data.table()
+for (i in 1:20){
+  f=fread(paste0("../03day2_1SLiM/05qtl_ld/rep",i,".txt"))
+  colnames(f)=c("new_pos_LD","F0_freq","F60_freq")
+  
+  #obtain median allele frequency per haplotype block
+  dt_merged=merge(haplo_id[,.(new_pos_LD,haplo_id)], f, by="new_pos_LD")
+  cols_for_median=c("F0_freq","F60_freq")
+
+  dt_median <- dt_merged[, lapply(.SD, median, na.rm = TRUE), by = haplo_id, .SDcols = cols_for_median]
+  
+  #calculate the median allele frequency change per haplotype block
+  afc_dt[,(paste0("r",i)) := dt_median[,F60_freq]-dt_median[,F0_freq]]
+}
+
+model5_jaccard=pairwise_jaccard_index(afc_dt)
+model5_jaccard$category="model5"
+```
+
+#merge data frame for visualisation
+```{r}
+dt=data.table(rbind(empirical_jaccard,
+                    model1_jaccard,
+                    model2_jaccard,
+                    model3_jaccard,
+                    model4_jaccard,
+                    model5_jaccard))
+#dt=dt[Var1 != Var2]
+dt[, category := as.factor(category)]
+ggplot(dt, aes(x=category, y=jaccard, fill=category))+
+  geom_violin()
+```

@@ -1,0 +1,77 @@
+// set up a simple neutral simulation
+initialize() {
+	if (exists("slimgui")){
+		defineConstant("rep",1);
+	}
+	defineConstant("Seed_number",getSeed());
+	//defineConstant("positions",c(0:98));
+	initializeMutationRate(1e-7);
+	initializeSex("A");
+	
+	// m1 mutation type: neutral
+	initializeMutationType("m1", 0.5, "f", 0.0);
+	m1.convertToSubstitution=F;
+	
+	// g1 genomic element type: uses m1 for all mutations
+	initializeGenomicElementType("g1", m1, 1.0);
+	
+	// uniform chromosome of length 100 kb with uniform recombination
+	initializeGenomicElement(g1, 0, 99);
+	initializeRecombinationRate(0.5);
+
+
+}
+
+// create a population of 500 individuals
+1 late() {
+	sim.addSubpop("p1", 189);
+	p1.genomes.readFromVCF("materials/189haplo_LE.vcf", mutationType=m1);
+	variants=sim.mutations.position;
+	defineGlobal("variants",variants);
+	
+	m1.convertToSubstitution=F;
+	defineGlobal("af_f0",sim.mutationFrequencies(p1));
+	
+	p1.setSubpopulationSize(300);
+	
+	p1Counts_f0=integer(length(variants));
+	for (indv in p1.individuals){
+		ind_list=match(indv.genomes.positionsOfMutationsOfType(m1),variants);
+		p1Counts_f0 = p1Counts_f0+integer(length(p1Counts_f0),0,1,ind_list);
+	}
+	defineGlobal("p1Counts_f0",p1Counts_f0);
+
+}
+
+mutationEffect(m1) {
+	return 1.0;
+}
+
+1: late(){
+	inds=p1.individuals;
+	phenotypes = inds.sumOfMutationsOfType(m1);
+	fitness_mean=1.3;
+	fitness_sd=1.2;
+	scale = dnorm(fitness_mean, fitness_mean, fitness_sd);
+	inds.fitnessScaling = 0.5 + 4*dnorm(phenotypes, fitness_mean, fitness_sd)/scale;
+	if (sim.cycle %10==1){
+		print((sim.cycle-1)+'  '+mean(phenotypes)+' '+mean(inds.fitnessScaling));
+	}
+}
+
+
+
+61 late(){
+	p1Counts_f60=integer(length(variants));
+	for (indv in p1.individuals){
+		ind_list=match(indv.genomes.positionsOfMutationsOfType(m1),variants);
+		p1Counts_f60 = p1Counts_f60+integer(length(p1Counts_f60),0,1,ind_list);
+	}
+	filename=paste0("04qtl_le/rep",rep,".txt");
+	writeFile(filename,"Pos\tF0_freq\tF60_freq");
+	for (i in 0:(length(p1Counts_f60)-1)){
+		writeFile(filename,paste((variants[i]+1),p1Counts_f0[i]/300,p1Counts_f60[i]/300,sep="\t"), append=T);
+	}
+	seed_file="04qtl_le_seed.log";
+	writeFile(seed_file,paste0("Rep",rep,"\t",Seed_number), append =T);
+}

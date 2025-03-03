@@ -1,0 +1,84 @@
+// set up a simple neutral simulation
+initialize() {
+	if (exists("slimgui")){
+		defineConstant("rep",1);
+		defineConstant("num_selected_snps",50);
+	}
+	len_2L=21080001;
+	len_2R=18980001;
+	len_3L=22280001;
+	len_3R=26970000;
+	
+	chrom_len=len_2L+len_2R+len_3L+len_3R;
+	defineConstant("Seed_number",getSeed());
+	//defineConstant("positions",c(0:98));
+	initializeMutationRate(0);
+	initializeSex("A");
+	
+	// m1 mutation type: neutral
+	initializeMutationType("m1", 0.5, "f", 0.0);
+	m1.convertToSubstitution=F;
+	
+	// g1 genomic element type: uses m1 for all mutations
+	initializeGenomicElementType("g1", m1, 1.0);
+	
+	// initialize genomic region
+	initializeGenomicElement(g1, 0, chrom_len);
+	// load recombination map
+	map=readCSV("materials/rec_map_slim.txt",c("ends","rates"),sep="\t");
+	ends=map.getValue("ends");
+	rates=map.getValue("rates")*1e-8;
+	initializeRecombinationRate(rates, ends);
+	
+	//load the haplotype cluster information
+	f_haplo=readCSV("materials/haplo_id_redundancy.txt",sep="\t");
+	
+	haplo_id=f_haplo.getValue("haplo_id");defineGlobal("list_haplo_id",haplo_id);
+	snp_position=f_haplo.getValue("new_pos_LD");defineGlobal("list_snp_position",snp_position);
+}
+
+// create a population of 500 individuals
+1 late() {
+	sim.addSubpop("p1", 189);
+	p1.genomes.readFromVCF("materials/189haplo_LD.vcf", mutationType=m1);
+	variants=sim.mutations.position;
+	defineGlobal("variants",variants);
+	
+	//only subset of SNPs respond to selection(rest to be neutral)
+	muts=sim.mutations;
+	sampled_muts=sample(muts, length(muts)- num_selected_snps);
+	sampled_muts.setSelectionCoeff(0.0);
+	
+	
+	sc=sim.mutations.selectionCoeff;
+	defineGlobal("selection_coefficient",sc);
+	m1.convertToSubstitution=F;
+	defineGlobal("af_f0",sim.mutationFrequencies(p1));
+	
+	p1.setSubpopulationSize(300);
+	
+	p1Counts_f0=integer(length(variants));
+	for (indv in p1.individuals){
+		ind_list=match(indv.genomes.positionsOfMutationsOfType(m1),variants);
+		p1Counts_f0 = p1Counts_f0+integer(length(p1Counts_f0),0,1,ind_list);
+	}
+	defineGlobal("p1Counts_f0",p1Counts_f0);
+
+
+}
+
+
+61 late(){
+	p1Counts_f60=integer(length(variants));
+	for (indv in p1.individuals){
+		ind_list=match(indv.genomes.positionsOfMutationsOfType(m1),variants);
+		p1Counts_f60 = p1Counts_f60+integer(length(p1Counts_f60),0,1,ind_list);
+	}
+	filename=paste0("03redundancy/rep",rep,".txt");
+	writeFile(filename,"Pos\tF0_freq\tF60_freq");
+	for (i in 0:(length(p1Counts_f60)-1)){
+		writeFile(filename,paste((variants[i]+1),p1Counts_f0[i]/300,p1Counts_f60[i]/300,sep="\t"), append=T);
+	}
+	seed_file="03redundancy_seed.log";
+	writeFile(seed_file,paste0("Rep",rep,"\t",Seed_number), append =T);
+}

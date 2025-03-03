@@ -1,0 +1,3 @@
+load("/Users/sduarri/Dropbox (PopGen)/teamstuff/workshops/EEcourse_2022/day3-haplotypes/data/929_targets_all.rds")
+load("/Users/sduarri/Dropbox (PopGen)/teamstuff/workshops/EEcourse_2022/day3-haplotypes/data/sim929_acer_cmh.rds")
+load("/Users/sduarri/Dropbox (PopGen)/teamstuff/workshops/EEcourse_2022/day3-haplotypes/data/sim929_cands.rds")
